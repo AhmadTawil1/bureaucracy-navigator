@@ -168,7 +168,7 @@ def step_answers(teacher) -> None:
 
 
 N_UNANSWERABLE = 150
-N_NEGATIVE_CANDIDATES = 600  # many get rejected by the judge: Kol Zchut articles overlap a lot
+N_NEGATIVE_CANDIDATES = 1500  # only ~11% pass the judge: Kol Zchut articles overlap a lot
 
 JUDGE_PROMPT = """קטעי מידע:
 {context}
