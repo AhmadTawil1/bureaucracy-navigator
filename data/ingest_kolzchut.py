@@ -5,8 +5,10 @@ import time
 from pathlib import Path
 
 import httpx
+import numpy as np
 from bs4 import BeautifulSoup, Tag
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from qdrant_client import QdrantClient, models
 from transformers import AutoTokenizer
 
 API = "https://www.kolzchut.org.il/w/he/api.php"
@@ -19,6 +21,9 @@ KEEP_TYPES = {"right", "proceeding", "service", "guide"}
 RAW_DIR = Path(__file__).parent / "raw"
 INDEX_FILE = RAW_DIR / "index.json"
 CHUNKS_FILE = Path(__file__).parent / "out" / "chunks.jsonl"
+EMBEDDINGS_FILE = Path(__file__).parent / "out" / "embeddings.npy"  # made by data/embed.py on Colab
+QDRANT_PATH = Path(__file__).parent.parent / "qdrant_data"
+COLLECTION = "kolzchut"
 ARTICLE_URL = "https://www.kolzchut.org.il/he/"
 
 EMBED_MODEL = "intfloat/multilingual-e5-large"
@@ -207,6 +212,28 @@ def chunk() -> list[dict]:
     return chunks
 
 
+def store() -> None:
+    """Load chunks.jsonl + embeddings.npy into a local Qdrant collection (row i = chunk i)."""
+    chunks = [json.loads(line) for line in CHUNKS_FILE.read_text(encoding="utf-8").splitlines()]
+    vectors = np.load(EMBEDDINGS_FILE)
+    assert len(vectors) == len(chunks), f"{len(vectors)} vectors for {len(chunks)} chunks: re-run data/embed.py"
+
+    qdrant = QdrantClient(path=str(QDRANT_PATH))
+    if qdrant.collection_exists(COLLECTION):
+        qdrant.delete_collection(COLLECTION)
+    qdrant.create_collection(
+        COLLECTION, vectors_config=models.VectorParams(size=vectors.shape[1], distance=models.Distance.COSINE),
+    )
+    qdrant.upsert(COLLECTION, points=[
+        models.PointStruct(id=i, vector=v.tolist(), payload=c) for i, (v, c) in enumerate(zip(vectors, chunks))
+    ])
+    print(f"{qdrant.count(COLLECTION).count} points in '{COLLECTION}' at {QDRANT_PATH}")
+    qdrant.close()
+
+
 if __name__ == "__main__":
+    # Embedding runs on Colab in between: chunk() → data/embed.py → store().
     download()
     chunk()
+    if EMBEDDINGS_FILE.exists():
+        store()
