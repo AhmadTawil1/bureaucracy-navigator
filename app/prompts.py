@@ -34,7 +34,8 @@ def qa_user(question: str, chunks: list[dict]) -> str:
 
 def letter_user(letter: str, chunks: list[dict]) -> str:
     return (f"מכתב שהתקבל:\n{letter}\n\nקטעי מידע רלוונטיים:\n{_context(chunks)}\n\n"
-            f"סכם את המכתב במבנה: {' / '.join(LETTER_HEADINGS)}.")
+            f"סכם את המכתב במבנה: {' / '.join(LETTER_HEADINGS)}.\n"
+            "כתוב כל כותרת בשורה נפרדת עם נקודתיים, בעברית פשוטה ובטקסט רגיל, בלי ** ובלי #.")
 
 
 def rewrite_user(paragraph: str) -> str:

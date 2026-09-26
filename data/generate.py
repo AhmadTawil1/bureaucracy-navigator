@@ -5,6 +5,7 @@
     python -u -m data.generate answers       # Task 1.10, part 2
     python -u -m data.generate negatives     # Task 1.11, part 1 (e5, no teacher)
     python -u -m data.generate unanswerable  # Task 1.11, part 2 (teacher as judge)
+    python -u -m data.generate letters       # Task 1.12
 
 Outputs go to Drive (GEN_DIR) so they survive the Colab session.
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from vllm import SamplingParams
 
-from app.prompts import REFUSAL_FULL, SYSTEM, _context, qa_user
+from app.prompts import LETTER_HEADINGS, REFUSAL_FULL, SYSTEM, _context, letter_user, qa_user
 from data.teacher import finish, load_teacher
 
 CHUNKS_FILE = Path(__file__).parent / "out" / "chunks.jsonl"
@@ -233,8 +234,91 @@ def step_unanswerable(teacher) -> None:
         print(f"    context: {[i.split('#')[0][:40] for i in ex['context_ids']]}")
 
 
+N_LETTER_CHUNKS = 450  # ~400 left after parse failures
+LETTER_CONTEXT = 3
+OBLIGATION = re.compile(r"תוך|בתוך|ימים|מועד|טופס|להגיש|לשלם|תשלום|חוב|אישור|לפנות|להתייצב|ערעור|החזר")
+
+LETTER_PROMPT = """לפניך מידע מאתר "כל זכות":
+
+{title}
+{text}
+
+כתוב מכתב רשמי ומציאותי שאזרח עשוי לקבל מהגוף הרלוונטי (למשל המוסד לביטוח לאומי, רשות המסים, שירות התעסוקה או מעסיק), על סמך העובדות האלה.
+המכתב צריך לכלול: תאריך, פנייה אישית, מה הוחלט או מה נדרש מהנמען, ומועד אחרון לפעולה אם יש כזה.
+השתמש בפרטים בדויים בלבד: השם ישראל ישראלי, מספר זהות 000000018, ותאריכים בשנת 2026.
+כתוב בשפה רשמית ובירוקרטית, כמו מכתב אמיתי.
+
+החזר בפורמט הזה בדיוק:
+מועד אחרון: DD/MM/YYYY (או: אין)
+---
+<המכתב>"""
+
+
+def parse_letter(text: str) -> tuple[str, str | None] | None:
+    """(letter, deadline or None) from 'מועד אחרון: ... / --- / letter'."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    if "---" not in text:
+        return None
+    head, letter = text.split("---", 1)
+    letter = letter.strip()
+    if len(letter.split()) < 40:
+        return None
+    date = re.search(r"\d{1,2}/\d{1,2}/20\d\d", head)
+    return letter, date.group() if date else None
+
+
+def step_letters(teacher) -> None:
+    """Task 1.12: the teacher writes an official letter per obligation chunk, then summarizes it with letter_user."""
+    chunks = read_jsonl(CHUNKS_FILE)
+    by_article = defaultdict(list)
+    for c in chunks:
+        by_article[c["title"]].append(c)
+
+    # Chunks with concrete obligations, most matches first, at most 3 per article.
+    rng = random.Random(SEED)
+    scored = sorted((c for c in chunks if len(c["text"].split()) >= 80),
+                    key=lambda c: -len(OBLIGATION.findall(c["text"])))
+    picked, per_article = [], defaultdict(int)
+    for c in scored:
+        if per_article[c["title"]] < 3 and len(picked) < N_LETTER_CHUNKS:
+            picked.append(c)
+            per_article[c["title"]] += 1
+
+    outputs = teacher.chat([[{"role": "user", "content": LETTER_PROMPT.format(title=c["title"], text=c["text"])}]
+                            for c in picked], SamplingParams(temperature=0.8, max_tokens=900))
+    letters = []
+    for c, out in zip(picked, outputs):
+        parsed = parse_letter(out.outputs[0].text)
+        if parsed:
+            others = [o for o in by_article[c["title"]] if o["id"] != c["id"]]
+            ctx = [c] + rng.sample(others, min(LETTER_CONTEXT - 1, len(others)))
+            rng.shuffle(ctx)
+            letters.append((c, parsed[0], parsed[1], ctx))
+    print(f"letters: {len(letters)} of {len(picked)} parsed")
+
+    prompts = [[{"role": "system", "content": SYSTEM}, {"role": "user", "content": letter_user(letter, ctx)}]
+               for _, letter, _, ctx in letters]
+    outputs = teacher.chat(prompts, SamplingParams(temperature=0.7, max_tokens=800))
+    examples = []
+    for (c, _, deadline, ctx), messages, out in zip(letters, prompts, outputs):
+        summary = re.sub(r"<think>.*?</think>", "", out.outputs[0].text, flags=re.S).strip()
+        examples.append({"type": "letter", "article": c["title"], "source_chunk_id": c["id"],
+                         "context_ids": [x["id"] for x in ctx], "deadline": deadline,
+                         "messages": messages + [{"role": "assistant", "content": summary}]})
+    write_jsonl(GEN_DIR / "letters.jsonl", examples)
+
+    all_headings = sum(all(h in ex["messages"][2]["content"] for h in LETTER_HEADINGS) for ex in examples)
+    print(f"letter examples: {len(examples)} → {GEN_DIR / 'letters.jsonl'}; "
+          f"all 4 headings: {all_headings}; with deadline: {sum(ex['deadline'] is not None for ex in examples)}")
+    for ex in rng.sample(examples, 3):
+        letter = ex["messages"][1]["content"].split("מכתב שהתקבל:\n")[1].split("\n\nקטעי מידע")[0]
+        print(f"\n=== [{ex['article']}] deadline: {ex['deadline']}\n--- LETTER:\n{letter[:700]}\n--- SUMMARY:\n"
+              f"{ex['messages'][2]['content'][:700]}")
+
+
 STEPS = {"questions": (step_questions, True), "retrieve": (step_retrieve, False), "answers": (step_answers, True),
-         "negatives": (step_negatives, False), "unanswerable": (step_unanswerable, True)}
+         "negatives": (step_negatives, False), "unanswerable": (step_unanswerable, True),
+         "letters": (step_letters, True)}
 
 if __name__ == "__main__":
     step, needs_teacher = STEPS[sys.argv[1]]
