@@ -3,6 +3,7 @@
     python -u -m data.generate questions     # Task 1.9
     python -u -m data.generate retrieve      # Task 1.10, part 1 (e5, no teacher)
     python -u -m data.generate answers       # Task 1.10, part 2
+    python -u -m data.generate unanswerable  # Task 1.11 (e5, no teacher)
 
 Outputs go to Drive (GEN_DIR) so they survive the Colab session.
 """
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from vllm import SamplingParams
 
-from app.prompts import SYSTEM, qa_user
+from app.prompts import REFUSAL_FULL, SYSTEM, qa_user
 from data.teacher import finish, load_teacher
 
 CHUNKS_FILE = Path(__file__).parent / "out" / "chunks.jsonl"
@@ -165,7 +166,36 @@ def step_answers(teacher) -> None:
         print(f"    A: {ex['messages'][2]['content'][:500]}")
 
 
-STEPS = {"questions": (step_questions, True), "retrieve": (step_retrieve, False), "answers": (step_answers, True)}
+def step_unanswerable(_teacher=None) -> None:
+    """Task 1.11: held-out questions + top-4 chunks from OTHER articles (hard negatives) → fixed refusal."""
+    import numpy as np
+    from sentence_transformers import SentenceTransformer
+
+    chunks = read_jsonl(CHUNKS_FILE)
+    vectors = np.load(EMBEDDINGS_FILE)
+    held_out = read_jsonl(GEN_DIR / "heldout_questions.jsonl")
+
+    embedder = SentenceTransformer(EMBED_MODEL, device="cuda")
+    q_vectors = embedder.encode([f"query: {q['question']}" for q in held_out], normalize_embeddings=True, batch_size=64)
+    ranked = np.argsort(-(q_vectors @ vectors.T), axis=1)
+
+    examples = []
+    for q, order in zip(held_out, ranked):
+        ctx = [chunks[i] for i in order if chunks[i]["title"] != q["article"]][:TOP_K]
+        messages = [{"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": qa_user(q["question"], ctx)},
+                    {"role": "assistant", "content": REFUSAL_FULL}]
+        examples.append({"type": "unanswerable", "article": q["article"], "source_chunk_id": q["source_chunk_id"],
+                         "context_ids": [c["id"] for c in ctx], "messages": messages})
+    write_jsonl(GEN_DIR / "unanswerable.jsonl", examples)
+    print(f"unanswerable examples: {len(examples)} → {GEN_DIR / 'unanswerable.jsonl'}")
+    for ex in random.Random(SEED).sample(examples, 3):
+        print(f"\n--- Q ({ex['article']}): {ex['messages'][1]['content'].split('שאלה: ')[1].split(chr(10))[0]}")
+        print(f"    context: {[i.split('#')[0][:40] for i in ex['context_ids']]}")
+
+
+STEPS = {"questions": (step_questions, True), "retrieve": (step_retrieve, False), "answers": (step_answers, True),
+         "unanswerable": (step_unanswerable, False)}
 
 if __name__ == "__main__":
     step, needs_teacher = STEPS[sys.argv[1]]
