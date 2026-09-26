@@ -6,6 +6,8 @@ from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup, Tag
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from transformers import AutoTokenizer
 
 API = "https://www.kolzchut.org.il/w/he/api.php"
 HEADERS = {"User-Agent": "BureaucracyNavigator/0.1 (student project; ahmadtawil.se@gmail.com)"}
@@ -16,6 +18,13 @@ KEEP_TYPES = {"right", "proceeding", "service", "guide"}
 
 RAW_DIR = Path(__file__).parent / "raw"
 INDEX_FILE = RAW_DIR / "index.json"
+CHUNKS_FILE = Path(__file__).parent / "out" / "chunks.jsonl"
+ARTICLE_URL = "https://www.kolzchut.org.il/he/"
+
+EMBED_MODEL = "intfloat/multilingual-e5-large"
+# Sizes in e5 tokens (limit 512); 384 leaves room for the "passage: title — section" prefix.
+CHUNK_TOKENS = 384
+CHUNK_OVERLAP = 64
 
 # Page chrome, not article content.
 REMOVE = [
@@ -85,6 +94,7 @@ def download() -> None:
 
 
 def _flat(text: str) -> str:
+    text = re.sub(r"[​‎‏­]", "", text)  # invisible zero-width / direction marks
     return re.sub(r" ([.,:;)])", r"\1", re.sub(r"\s+", " ", text)).strip()
 
 
@@ -148,5 +158,55 @@ def clean(html: str) -> list[tuple[str, str]]:
     return [(title, "\n".join(lines)) for title, lines in sections if lines and title.split(" / ")[0] not in SKIP_SECTIONS]
 
 
+def chunk() -> list[dict]:
+    """Clean every saved article, pack its sections into token-sized chunks, write chunks.jsonl.
+
+    Small neighbouring sections of one article are packed together (each keeps a "## heading"
+    line); a section too big for one chunk is split with a 64-token overlap.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL)
+    n_tokens = lambda s: len(tokenizer(s, add_special_tokens=False)["input_ids"])
+    splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+        tokenizer,
+        chunk_size=CHUNK_TOKENS - 32,  # room for the "## heading" line
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", " ", ""],  # prefer whole lines, then words
+    )
+    index = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+    chunks = []
+    for i, title in sorted(index.items(), key=lambda kv: int(kv[0])):
+        url = ARTICLE_URL + title.replace(" ", "_")
+        # One block per section, or several if the section is too big.
+        blocks = []
+        for section, text in clean((RAW_DIR / f"{i}.html").read_text(encoding="utf-8")):
+            pieces = [text] if n_tokens(f"## {section}\n{text}") <= CHUNK_TOKENS else splitter.split_text(text)
+            blocks += [(section, f"## {section}\n{piece}") for piece in pieces]
+
+        # Greedy packing: add blocks while the chunk stays within CHUNK_TOKENS.
+        packed: list[list[tuple[str, str]]] = []
+        size = 0
+        for block in blocks:
+            t = n_tokens(block[1])
+            if packed and size + t <= CHUNK_TOKENS:
+                packed[-1].append(block)
+                size += t
+            else:
+                packed.append([block])
+                size = t
+
+        for n, group in enumerate(packed):
+            sections = list(dict.fromkeys(s for s, _ in group))  # unique, in order
+            chunks.append({"id": f"{title}#{n}", "title": title, "section": " | ".join(sections),
+                           "url": url, "text": "\n\n".join(b for _, b in group)})
+
+    CHUNKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with CHUNKS_FILE.open("w", encoding="utf-8") as f:
+        for c in chunks:
+            f.write(json.dumps(c, ensure_ascii=False) + "\n")
+    print(f"{len(chunks)} chunks from {len(index)} articles → {CHUNKS_FILE}")
+    return chunks
+
+
 if __name__ == "__main__":
     download()
+    chunk()
