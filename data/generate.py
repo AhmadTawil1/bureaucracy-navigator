@@ -7,7 +7,6 @@
     python -u -m data.generate unanswerable  # Task 1.11, part 2 (teacher as judge)
     python -u -m data.generate letters       # Task 1.12
     python -u -m data.generate rewrites      # Task 1.13
-    python -u -m data.generate verify        # Task 1.15 (teacher checks QA answers)
 
 Outputs go to Drive (GEN_DIR) so they survive the Colab session.
 """
@@ -152,7 +151,8 @@ def step_answers(teacher) -> None:
     prompts = [[{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": qa_user(q["question"], [chunk_by_id[i] for i in q["context_ids"]])}]
                for q in qa]
-    outputs = teacher.chat(prompts, SamplingParams(temperature=0.7, max_tokens=1200))
+    # 0.2, not the plan's 0.7: at 0.7 about a third of the answers had made-up or wrong facts (Task 1.15).
+    outputs = teacher.chat(prompts, SamplingParams(temperature=0.2, max_tokens=1200))
 
     examples = []
     for q, messages, out in zip(qa, prompts, outputs):
@@ -369,36 +369,9 @@ def step_rewrites(teacher) -> None:
         print(f"\n=== [{p['article']}]\n--- BEFORE:\n{p['paragraph']}\n--- AFTER:\n{ex['messages'][2]['content']}")
 
 
-VERIFY_PROMPT = """קטעי מידע:
-{context}
-
-שאלה: {question}
-
-תשובה:
-{answer}
-
-האם כל הטענות בתשובה מבוססות על קטעי המידע, והתשובה עונה נכון על השאלה? ענה במילה אחת: כן או לא."""
-
-
-def step_verify(teacher) -> None:
-    """Task 1.15 fix: the teacher checks each QA answer against its chunks → qa_verdicts.jsonl (line i = qa.jsonl line i)."""
-    chunk_by_id = {c["id"]: c for c in read_jsonl(CHUNKS_FILE)}
-    qa = read_jsonl(GEN_DIR / "qa.jsonl")
-    prompts = [[{"role": "user", "content": VERIFY_PROMPT.format(
-                    context=_context([chunk_by_id[i] for i in ex["context_ids"]]),
-                    question=ex["messages"][1]["content"].rsplit("\n\nשאלה: ", 1)[1].split("\n")[0],
-                    answer=ex["messages"][2]["content"])}]
-               for ex in qa]
-    outputs = teacher.chat(prompts, SamplingParams(temperature=0, max_tokens=5))
-    verdicts = [re.sub(r"<think>.*?</think>", "", o.outputs[0].text, flags=re.S).strip() for o in outputs]
-    write_jsonl(GEN_DIR / "qa_verdicts.jsonl", [{"verdict": v} for v in verdicts])
-    print(f"verified: {sum(v.startswith('כן') for v in verdicts)} yes, {sum(v.startswith('לא') for v in verdicts)} no, "
-          f"{sum(not v.startswith(('כן', 'לא')) for v in verdicts)} other, of {len(qa)} → {GEN_DIR / 'qa_verdicts.jsonl'}")
-
-
 STEPS = {"questions": (step_questions, True), "retrieve": (step_retrieve, False), "answers": (step_answers, True),
          "negatives": (step_negatives, False), "unanswerable": (step_unanswerable, True),
-         "letters": (step_letters, True), "rewrites": (step_rewrites, True), "verify": (step_verify, True)}
+         "letters": (step_letters, True), "rewrites": (step_rewrites, True)}
 
 if __name__ == "__main__":
     step, needs_teacher = STEPS[sys.argv[1]]

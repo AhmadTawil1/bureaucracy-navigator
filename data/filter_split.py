@@ -23,7 +23,6 @@ CITATION = re.compile(r"\[(\d+)\]")
 PLACEHOLDER = re.compile(r"<(email|phone)>|\[[^\]\d][^\]]*\]|\]\(|mailto:")
 # The answer talks as the user ("אני יכול", "שלי"), usually because it copied the question.
 FIRST_PERSON = re.compile(r"(?<![א-ת])(אני|שלי|לי)(?![א-ת])")
-VERDICTS_FILE = GEN_DIR / "qa_verdicts.jsonl"  # optional, from `data.generate verify`
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -97,8 +96,6 @@ def drop_reason(ex: dict) -> str | None:
     if ex["type"] == "letter" and ex["deadline"] and not any(v in answer for v in date_variants(ex["deadline"])):
         return "letter deadline not in summary"
     # Rules added after the manual review (Task 1.15):
-    if ex["type"] == "qa" and ex.get("verdict") and not ex["verdict"].startswith("כן"):
-        return "teacher: answer not supported by context"
     if PLACEHOLDER.search(answer):
         return "placeholder or link"
     if ex["type"] == "qa" and answer.count("?") >= 3:
@@ -114,17 +111,7 @@ def drop_reason(ex: dict) -> str | None:
 
 
 def filter_examples() -> list[dict]:
-    if VERDICTS_FILE.exists():  # line i = qa.jsonl line i
-        verdicts = read_jsonl(VERDICTS_FILE)
-        qa = read_jsonl(GEN_DIR / "qa.jsonl")
-        assert len(verdicts) == len(qa), "qa_verdicts.jsonl doesn't match qa.jsonl"
-        for ex, v in zip(qa, verdicts):
-            ex["verdict"] = v["verdict"]
-        examples = [clean(ex) for ex in qa]
-        examples += [clean(ex) for name in GEN_FILES if name != "qa.jsonl" for ex in read_jsonl(GEN_DIR / name)]
-    else:
-        print("note: no qa_verdicts.jsonl yet, QA answers are not verified")
-        examples = [clean(ex) for name in GEN_FILES for ex in read_jsonl(GEN_DIR / name)]
+    examples = [clean(ex) for name in GEN_FILES for ex in read_jsonl(GEN_DIR / name)]
     kept, reasons, seen = [], Counter(), set()
     for ex in examples:
         reason = drop_reason(ex)
