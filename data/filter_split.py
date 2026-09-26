@@ -1,10 +1,11 @@
-"""Quality filters (§6.4, Task 1.14) and split by article (Task 1.16).
+"""Quality filters (§6.4, Task 1.14) and split by article (Task 1.16) → data/out/{train,val,test}.jsonl.
 
     uv run python -m data.filter_split
 
 Reads the generated examples from data/out/gen/ (downloaded from Drive).
 """
 import json
+import random
 import re
 from collections import Counter
 from pathlib import Path
@@ -135,5 +136,39 @@ def filter_examples() -> list[dict]:
     return kept
 
 
+SEED = 42
+TEST_SHARE = 0.15
+VAL_SHARE = 0.10
+
+
+def context_articles(ex: dict) -> set[str]:
+    return {cid.rsplit("#", 1)[0] for cid in ex.get("context_ids", [])}
+
+
+def split(examples: list[dict]) -> None:
+    """Task 1.16: 15% of ARTICLES → test; the rest → 90/10 train/val by example."""
+    articles = sorted({ex["article"] for ex in examples})
+    random.Random(SEED).shuffle(articles)
+    test_articles = set(articles[:round(len(articles) * TEST_SHARE)])
+
+    test = [ex for ex in examples if ex["article"] in test_articles]
+    rest = [ex for ex in examples if ex["article"] not in test_articles]
+    # A train example whose context shows a chunk of a test article would leak it: drop those.
+    leaking = [ex for ex in rest if context_articles(ex) & test_articles]
+    rest = [ex for ex in rest if not context_articles(ex) & test_articles]
+    random.Random(SEED).shuffle(rest)
+    n_val = round(len(rest) * VAL_SHARE)
+    val, train = rest[:n_val], rest[n_val:]
+
+    for ex in train + val:
+        assert ex["article"] not in test_articles and not context_articles(ex) & test_articles
+
+    for name, rows in [("train", train), ("val", val), ("test", test)]:
+        write_jsonl(OUT_DIR / f"{name}.jsonl", rows)
+        print(f"{name:5s}: {len(rows):4d}  {dict(Counter(ex['type'] for ex in rows))}")
+    print(f"articles: {len(articles)} ({len(test_articles)} test); "
+          f"dropped {len(leaking)} train/val examples whose context shows a test article")
+
+
 if __name__ == "__main__":
-    filter_examples()
+    split(filter_examples())
