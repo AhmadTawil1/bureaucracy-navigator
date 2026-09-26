@@ -8,6 +8,7 @@ which uses tokenizer.json as-is (byte-level BPE) and keeps the chat template.
 Smoke test (Task 1.8): `python -m data.teacher` from the repo root.
 """
 import json
+import os
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
@@ -50,4 +51,5 @@ if __name__ == "__main__":
     out = teacher.chat([messages], SamplingParams(temperature=0.7, max_tokens=1200))[0]
     print(f"===== PROMPT TOKENS: {len(out.prompt_token_ids)} =====")
     print("===== ANSWER =====")
-    print(out.outputs[0].text)
+    print(out.outputs[0].text, flush=True)
+    os._exit(0)  # vLLM can hang on shutdown in Colab; the work is done
