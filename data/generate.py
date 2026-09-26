@@ -6,6 +6,7 @@
     python -u -m data.generate negatives     # Task 1.11, part 1 (e5, no teacher)
     python -u -m data.generate unanswerable  # Task 1.11, part 2 (teacher as judge)
     python -u -m data.generate letters       # Task 1.12
+    python -u -m data.generate rewrites      # Task 1.13
 
 Outputs go to Drive (GEN_DIR) so they survive the Colab session.
 """
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from vllm import SamplingParams
 
-from app.prompts import LETTER_HEADINGS, REFUSAL_FULL, SYSTEM, _context, letter_user, qa_user
+from app.prompts import LETTER_HEADINGS, REFUSAL_FULL, SYSTEM, _context, letter_user, qa_user, rewrite_user
 from data.teacher import finish, load_teacher
 
 CHUNKS_FILE = Path(__file__).parent / "out" / "chunks.jsonl"
@@ -316,9 +317,60 @@ def step_letters(teacher) -> None:
               f"{ex['messages'][2]['content'][:700]}")
 
 
+N_REWRITES = 400
+
+
+def avg_sentence_words(paragraph: str) -> float:
+    sentences = [s for s in re.split(r"(?<=[.!?;])\s+", paragraph) if s.split()]
+    return sum(len(s.split()) for s in sentences) / len(sentences)
+
+
+def step_rewrites(teacher) -> None:
+    """Task 1.13: long-sentence paragraphs (list items / lines of the chunks) → plain-Hebrew rewrite."""
+    candidates, seen = [], set()
+    for c in read_jsonl(CHUNKS_FILE):
+        for line in c["text"].splitlines():
+            p = re.sub(r"^\s*-\s*", "", line).strip()
+            if p.startswith(("##", "שאלה:", "תשובה:")) or "|" in p or p in seen:  # headings, FAQ, tables
+                continue
+            seen.add(p)  # chunks overlap, so the same line can appear twice
+            if len(p.split()) >= 30 and avg_sentence_words(p) > 20:
+                candidates.append({"article": c["title"], "source_chunk_id": c["id"], "paragraph": p})
+
+    # Round-robin over articles so the rewrites cover many topics.
+    rng = random.Random(SEED)
+    by_article = defaultdict(list)
+    for cand in candidates:
+        by_article[cand["article"]].append(cand)
+    for items in by_article.values():
+        rng.shuffle(items)
+    picked = []
+    while len(picked) < N_REWRITES and any(by_article.values()):
+        for items in by_article.values():
+            if items and len(picked) < N_REWRITES:
+                picked.append(items.pop())
+
+    prompts = [[{"role": "system", "content": SYSTEM}, {"role": "user", "content": rewrite_user(p["paragraph"])}]
+               for p in picked]
+    outputs = teacher.chat(prompts, SamplingParams(temperature=0.7, max_tokens=600))
+    examples = []
+    for p, messages, out in zip(picked, prompts, outputs):
+        rewrite = re.sub(r"<think>.*?</think>", "", out.outputs[0].text, flags=re.S).strip()
+        examples.append({"type": "rewrite", "article": p["article"], "source_chunk_id": p["source_chunk_id"],
+                         "messages": messages + [{"role": "assistant", "content": rewrite}]})
+    write_jsonl(GEN_DIR / "rewrites.jsonl", examples)
+
+    before = sum(avg_sentence_words(p["paragraph"]) for p in picked) / len(picked)
+    after = sum(avg_sentence_words(ex["messages"][2]["content"]) for ex in examples) / len(examples)
+    print(f"rewrite examples: {len(examples)} from {len({p['article'] for p in picked})} articles "
+          f"→ {GEN_DIR / 'rewrites.jsonl'}; words per sentence: {before:.1f} → {after:.1f}")
+    for p, ex in rng.sample(list(zip(picked, examples)), 3):
+        print(f"\n=== [{p['article']}]\n--- BEFORE:\n{p['paragraph']}\n--- AFTER:\n{ex['messages'][2]['content']}")
+
+
 STEPS = {"questions": (step_questions, True), "retrieve": (step_retrieve, False), "answers": (step_answers, True),
          "negatives": (step_negatives, False), "unanswerable": (step_unanswerable, True),
-         "letters": (step_letters, True)}
+         "letters": (step_letters, True), "rewrites": (step_rewrites, True)}
 
 if __name__ == "__main__":
     step, needs_teacher = STEPS[sys.argv[1]]
