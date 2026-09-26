@@ -23,8 +23,13 @@ def _context(chunks: list[dict]) -> str:
     return "\n\n".join(f"[{i}] {c['title']}\n{c['text']}" for i, c in enumerate(chunks, 1))
 
 
+QA_RULES = ("ענה בעברית פשוטה ובטקסט רגיל, בלי ** ובלי #. "
+            "בסוף כל משפט כתוב בסוגריים מרובעים את מספר הקטע שהמשפט מבוסס עליו, למשל [1] או [2].")
+
+
 def qa_user(question: str, chunks: list[dict]) -> str:
-    return f"קטעי מידע:\n{_context(chunks)}\n\nשאלה: {question}"
+    # The rules come last: the teacher ignored them when they were only in SYSTEM.
+    return f"קטעי מידע:\n{_context(chunks)}\n\nשאלה: {question}\n\n{QA_RULES}"
 
 
 def letter_user(letter: str, chunks: list[dict]) -> str:
