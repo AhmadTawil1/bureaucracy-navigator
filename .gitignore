@@ -11,3 +11,8 @@ wheels/
 
 .env
 CLAUDE.md
+
+# Local data and models (large, regenerable)
+qdrant_data/
+data/raw/
+*.gguf

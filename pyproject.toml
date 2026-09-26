@@ -1,7 +1,28 @@
 [project]
 name = "bureaucracy-navigator"
 version = "0.1.0"
-description = "Add your description here"
+description = "Telegram bot that explains Israeli bureaucracy in simple Hebrew (fine-tuned DictaLM + RAG over Kol Zchut)"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "openai>=3.19.2",
+    "pillow>=12.3.0",
+    "pydantic-settings>=2.15.0",
+    "pymupdf>=1.28.2",
+    "pytesseract>=0.3.13",
+    "python-bidi>=0.6.11",
+    "qdrant-client>=1.19.1",
+    "sentence-transformers>=6.1.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
