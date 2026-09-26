@@ -353,7 +353,7 @@ def step_rewrites(teacher) -> None:
 
     prompts = [[{"role": "system", "content": SYSTEM}, {"role": "user", "content": rewrite_user(p["paragraph"])}]
                for p in picked]
-    outputs = teacher.chat(prompts, SamplingParams(temperature=0.7, max_tokens=600))
+    outputs = teacher.chat(prompts, SamplingParams(temperature=0.2, max_tokens=600))  # 0.2: keep the meaning (Task 1.15)
     examples = []
     for p, messages, out in zip(picked, prompts, outputs):
         rewrite = re.sub(r"<think>.*?</think>", "", out.outputs[0].text, flags=re.S).strip()
