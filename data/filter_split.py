@@ -19,6 +19,11 @@ GEN_FILES = ["qa.jsonl", "unanswerable.jsonl", "letters.jsonl", "rewrites.jsonl"
 MAX_WORDS = 250
 MIN_HEBREW = 0.7
 CITATION = re.compile(r"\[(\d+)\]")
+# Made-up placeholders and markdown links, e.g. "<email>", "[שם העיר]", "[טלפון]", "(mailto:...)".
+PLACEHOLDER = re.compile(r"<(email|phone)>|\[[^\]\d][^\]]*\]|\]\(|mailto:")
+# The answer talks as the user ("אני יכול", "שלי"), usually because it copied the question.
+FIRST_PERSON = re.compile(r"(?<![א-ת])(אני|שלי|לי)(?![א-ת])")
+VERDICTS_FILE = GEN_DIR / "qa_verdicts.jsonl"  # optional, from `data.generate verify`
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -42,7 +47,9 @@ def clean(ex: dict) -> dict:
     if ex["type"] == "letter":
         # The letter is the input: real letters (OCR text) have no markdown either.
         head, rest = user["content"].split("\n\nקטעי מידע רלוונטיים:", 1)
-        user["content"] = strip_markdown(head) + "\n\nקטעי מידע רלוונטיים:" + rest
+        # Made-up signature placeholders ("[שם הדובר/ת]", "<phone>") don't appear in real letters.
+        head = re.sub(r"[ \t]*" + PLACEHOLDER.pattern, "", strip_markdown(head))
+        user["content"] = head + "\n\nקטעי מידע רלוונטיים:" + rest
         # The teacher's "מועד אחרון" header date is often not in the letter (which uses "תוך 60 יום"):
         # keep it only when the letter really contains it.
         if ex["deadline"] and not any(v in head for v in date_variants(ex["deadline"])):
@@ -89,6 +96,15 @@ def drop_reason(ex: dict) -> str | None:
         return "letter missing a heading"
     if ex["type"] == "letter" and ex["deadline"] and not any(v in answer for v in date_variants(ex["deadline"])):
         return "letter deadline not in summary"
+    # Rules added after the manual review (Task 1.15):
+    if ex["type"] == "qa" and ex.get("verdict") and not ex["verdict"].startswith("כן"):
+        return "teacher: answer not supported by context"
+    if PLACEHOLDER.search(answer):
+        return "placeholder or link"
+    if ex["type"] == "qa" and answer.count("?") >= 3:
+        return "QA answer lists questions"
+    if ex["type"] == "qa" and len(FIRST_PERSON.findall(answer)) >= 3:
+        return "QA answer in first person"
     if len(answer.split()) > MAX_WORDS:
         return f"over {MAX_WORDS} words"
     letters = re.findall(r"[A-Za-zא-ת]", answer)
@@ -98,7 +114,17 @@ def drop_reason(ex: dict) -> str | None:
 
 
 def filter_examples() -> list[dict]:
-    examples = [clean(ex) for name in GEN_FILES for ex in read_jsonl(GEN_DIR / name)]
+    if VERDICTS_FILE.exists():  # line i = qa.jsonl line i
+        verdicts = read_jsonl(VERDICTS_FILE)
+        qa = read_jsonl(GEN_DIR / "qa.jsonl")
+        assert len(verdicts) == len(qa), "qa_verdicts.jsonl doesn't match qa.jsonl"
+        for ex, v in zip(qa, verdicts):
+            ex["verdict"] = v["verdict"]
+        examples = [clean(ex) for ex in qa]
+        examples += [clean(ex) for name in GEN_FILES if name != "qa.jsonl" for ex in read_jsonl(GEN_DIR / name)]
+    else:
+        print("note: no qa_verdicts.jsonl yet, QA answers are not verified")
+        examples = [clean(ex) for name in GEN_FILES for ex in read_jsonl(GEN_DIR / name)]
     kept, reasons, seen = [], Counter(), set()
     for ex in examples:
         reason = drop_reason(ex)
