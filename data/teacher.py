@@ -28,6 +28,14 @@ def fixed_tokenizer(repo: str = TEACHER_MODEL, dst: Path = TOKENIZER_DIR) -> str
     return str(dst)
 
 
+def finish() -> None:
+    """Exit right away, killing vLLM's engine process too (it can hang the Colab cell on shutdown)."""
+    import psutil
+    for child in psutil.Process().children(recursive=True):
+        child.kill()
+    os._exit(0)
+
+
 def load_teacher() -> LLM:
     return LLM(
         model=TEACHER_MODEL,
@@ -52,4 +60,4 @@ if __name__ == "__main__":
     print(f"===== PROMPT TOKENS: {len(out.prompt_token_ids)} =====")
     print("===== ANSWER =====")
     print(out.outputs[0].text, flush=True)
-    os._exit(0)  # vLLM can hang on shutdown in Colab; the work is done
+    finish()
