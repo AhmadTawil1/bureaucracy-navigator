@@ -1,6 +1,8 @@
 """Teacher data generation (runs on Colab, §6.3). One step per run:
 
     python -u -m data.generate questions     # Task 1.9
+    python -u -m data.generate retrieve      # Task 1.10, part 1 (e5, no teacher)
+    python -u -m data.generate answers       # Task 1.10, part 2
 
 Outputs go to Drive (GEN_DIR) so they survive the Colab session.
 """
@@ -13,13 +15,19 @@ from pathlib import Path
 
 from vllm import SamplingParams
 
+from app.prompts import SYSTEM, qa_user
 from data.teacher import finish, load_teacher
 
 CHUNKS_FILE = Path(__file__).parent / "out" / "chunks.jsonl"
-GEN_DIR = Path("/content/drive/MyDrive/bureaucracy-navigator/gen")
+DRIVE_DIR = Path("/content/drive/MyDrive/bureaucracy-navigator")
+GEN_DIR = DRIVE_DIR / "gen"
+EMBEDDINGS_FILE = DRIVE_DIR / "embeddings.npy"  # from data/embed.py, row i = chunk i
+EMBED_MODEL = "intfloat/multilingual-e5-large"
 SEED = 42
 
 N_QUESTIONS = 1000   # 850 for grounded answers (1.10) + 150 unanswerable (1.11)
+N_QA = 850
+TOP_K = 4
 MIN_CHUNK_WORDS = 40  # skip tiny chunks (e.g. a list of two office names)
 
 QUESTIONS_PROMPT = """לפניך קטע מתוך אתר "כל זכות":
@@ -97,11 +105,70 @@ def step_questions(teacher) -> None:
         print(f"  [{q['article']}] {q['question']}")
 
 
-STEPS = {"questions": step_questions}
+def step_retrieve(_teacher=None) -> None:
+    """Task 1.10a: split questions (850 QA / 150 held out for 1.11); top-4 e5 context per QA question."""
+    import numpy as np
+    from sentence_transformers import SentenceTransformer
+
+    chunks = read_jsonl(CHUNKS_FILE)
+    vectors = np.load(EMBEDDINGS_FILE)
+    assert len(vectors) == len(chunks), "embeddings.npy doesn't match chunks.jsonl"
+    index_of = {c["id"]: i for i, c in enumerate(chunks)}
+
+    rng = random.Random(SEED)
+    questions = read_jsonl(GEN_DIR / "questions.jsonl")
+    rng.shuffle(questions)
+    qa, held_out = questions[:N_QA], questions[N_QA:]
+
+    embedder = SentenceTransformer(EMBED_MODEL, device="cuda")
+    q_vectors = embedder.encode([f"query: {q['question']}" for q in qa], normalize_embeddings=True, batch_size=64)
+    top = np.argsort(-(q_vectors @ vectors.T), axis=1)[:, :TOP_K]
+
+    source_found = 0
+    for q, hits in zip(qa, top):
+        ids = [int(i) for i in hits]
+        source = index_of[q["source_chunk_id"]]
+        if source in ids:
+            source_found += 1
+        else:
+            ids[-1] = source  # the answer must be in the context
+        rng.shuffle(ids)      # so the right chunk isn't always [1]
+        q["context_ids"] = [chunks[i]["id"] for i in ids]
+    write_jsonl(GEN_DIR / "qa_questions.jsonl", qa)
+    write_jsonl(GEN_DIR / "heldout_questions.jsonl", held_out)
+    print(f"QA questions: {len(qa)} (source chunk in e5 top-{TOP_K}: {source_found / len(qa):.0%}), "
+          f"held out for 1.11: {len(held_out)}")
+
+
+def step_answers(teacher) -> None:
+    """Task 1.10b: the teacher answers each QA question with SYSTEM + qa_user (same prompt as the student)."""
+    chunk_by_id = {c["id"]: c for c in read_jsonl(CHUNKS_FILE)}
+    qa = read_jsonl(GEN_DIR / "qa_questions.jsonl")
+    prompts = [[{"role": "system", "content": SYSTEM},
+                {"role": "user", "content": qa_user(q["question"], [chunk_by_id[i] for i in q["context_ids"]])}]
+               for q in qa]
+    outputs = teacher.chat(prompts, SamplingParams(temperature=0.7, max_tokens=1200))
+
+    examples = []
+    for q, messages, out in zip(qa, prompts, outputs):
+        answer = re.sub(r"<think>.*?</think>", "", out.outputs[0].text, flags=re.S).strip()
+        examples.append({"type": "qa", "article": q["article"], "source_chunk_id": q["source_chunk_id"],
+                         "context_ids": q["context_ids"],
+                         "messages": messages + [{"role": "assistant", "content": answer}]})
+    write_jsonl(GEN_DIR / "qa.jsonl", examples)
+    print(f"QA examples: {len(examples)} → {GEN_DIR / 'qa.jsonl'}")
+
+    for ex in random.Random(SEED).sample(examples, 5):
+        source_pos = ex["context_ids"].index(ex["source_chunk_id"]) + 1
+        print(f"\n--- Q: {ex['messages'][1]['content'].split('שאלה: ')[1].split(chr(10))[0]}")
+        print(f"    context: {[chunk_by_id[i]['title'][:40] for i in ex['context_ids']]}  (source = [{source_pos}])")
+        print(f"    A: {ex['messages'][2]['content'][:500]}")
+
+
+STEPS = {"questions": (step_questions, True), "retrieve": (step_retrieve, False), "answers": (step_answers, True)}
 
 if __name__ == "__main__":
-    step = sys.argv[1]
-    teacher = load_teacher()
-    STEPS[step](teacher)
+    step, needs_teacher = STEPS[sys.argv[1]]
+    step(load_teacher() if needs_teacher else None)
     sys.stdout.flush()
     finish()
