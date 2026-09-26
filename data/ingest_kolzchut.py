@@ -1,9 +1,11 @@
 """Kol Zchut ingestion: fetch → clean → chunk → embed → Qdrant + chunks.jsonl (§5)."""
 import json
+import re
 import time
 from pathlib import Path
 
 import httpx
+from bs4 import BeautifulSoup, Tag
 
 API = "https://www.kolzchut.org.il/w/he/api.php"
 HEADERS = {"User-Agent": "BureaucracyNavigator/0.1 (student project; ahmadtawil.se@gmail.com)"}
@@ -14,6 +16,15 @@ KEEP_TYPES = {"right", "proceeding", "service", "guide"}
 
 RAW_DIR = Path(__file__).parent / "raw"
 INDEX_FILE = RAW_DIR / "index.json"
+
+# Page chrome, not article content.
+REMOVE = [
+    ".mw-editsection", ".toc-box", ".kz-preferred-source", "#chat-section", ".kolsherut-links-section",
+    ".article-see-also", "#helpme-section", ".share-links", ".noprint", ".rs_skip",
+    "button", "style", "script", "sup.reference", ".mw-references-wrap",
+]
+SKIP_SECTIONS = {"מקורות משפטיים ורשמיים"}  # only lists of law titles and links
+INTRO = "תקציר"
 
 
 def category_pages(client: httpx.Client, category: str) -> list[str]:
@@ -71,6 +82,70 @@ def download() -> None:
                 print(f"  {len(index)} saved")
 
     print(f"done: {len(index)} articles in {RAW_DIR}")
+
+
+def _flat(text: str) -> str:
+    return re.sub(r" ([.,:;)])", r"\1", re.sub(r"\s+", " ", text)).strip()
+
+
+def _text(el: Tag) -> str:
+    """Inline text without nested lists/tables. No separator, so ל<a>תנאים</a> stays 'לתנאים'."""
+    return _flat("".join(c.get_text() if isinstance(c, Tag) else str(c)
+                         for c in el.children if not (isinstance(c, Tag) and c.name in {"ul", "ol", "table"})))
+
+
+def _lines(el: Tag) -> list[str]:
+    """Readable lines for one content block."""
+    if el.name in {"ul", "ol"}:
+        lines = []
+        for li in el.find_all("li", recursive=False):
+            lines.append(f"- {_text(li)}")
+            for sub in li.find_all(["ul", "ol"], recursive=False):
+                lines += ["  " + line for line in _lines(sub)]
+        return lines
+    if el.name == "table":
+        return [" | ".join(_text(c) for c in tr.find_all(["th", "td"])) for tr in el.find_all("tr")]
+    if el.name == "details":  # FAQ item
+        summary = el.find("summary")
+        question = _text(summary) if summary else ""
+        if summary:
+            summary.extract()
+        return [f"שאלה: {question}", f"תשובה: {_flat(el.get_text())}"]
+    if "wr-note" in el.get("class", []):  # "שימו לב" / "טיפ" / "לדוגמה" box, label set in clean()
+        return [_flat(el.get_text())]
+    if el.name == "div" and el.find(["p", "ul", "ol", "table"], recursive=False):
+        return [line for child in el.find_all(True, recursive=False) for line in _lines(child)]
+    return [_text(el)]
+
+
+def clean(html: str) -> list[tuple[str, str]]:
+    """Article HTML → [(section_title, text)] in page order."""
+    root = BeautifulSoup(html, "html.parser").select_one(".mw-parser-output")
+    for selector in REMOVE:
+        for el in root.select(selector):
+            el.decompose()
+    for header in root.select(".wr-note .header-text"):
+        header.string = f"{_text(header)}: "
+    for el in root.find_all(["p", "div", "li", "td", "th", "summary", "br"]):
+        el.append(" ")  # keep separate blocks from gluing words together
+
+    # Intro box: keep the summary item, drop the navigation items ("ראו בהמשך", "לחצו כאן").
+    intro_lines = []
+    if intro := root.select_one(".article-intro"):
+        intro_lines = [_text(it) for it in intro.select(".emphasis-type-info .emphasis-item-text")]
+        intro.decompose()
+
+    sections: list[tuple[str, list[str]]] = [(INTRO, intro_lines)]
+    h2 = ""
+    for el in root.find_all(True, recursive=False):
+        if el.name in {"h2", "h3"}:
+            title = _text(el)
+            if el.name == "h2":
+                h2 = title
+            sections.append((title if el.name == "h2" else f"{h2} / {title}", []))
+        elif h2 not in SKIP_SECTIONS:
+            sections[-1][1].extend(line for line in _lines(el) if line.strip("- "))
+    return [(title, "\n".join(lines)) for title, lines in sections if lines and title.split(" / ")[0] not in SKIP_SECTIONS]
 
 
 if __name__ == "__main__":
