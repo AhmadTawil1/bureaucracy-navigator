@@ -3,7 +3,8 @@
     python -u -m data.generate questions     # Task 1.9
     python -u -m data.generate retrieve      # Task 1.10, part 1 (e5, no teacher)
     python -u -m data.generate answers       # Task 1.10, part 2
-    python -u -m data.generate unanswerable  # Task 1.11 (e5, no teacher)
+    python -u -m data.generate negatives     # Task 1.11, part 1 (e5, no teacher)
+    python -u -m data.generate unanswerable  # Task 1.11, part 2 (teacher as judge)
 
 Outputs go to Drive (GEN_DIR) so they survive the Colab session.
 """
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from vllm import SamplingParams
 
-from app.prompts import REFUSAL_FULL, SYSTEM, qa_user
+from app.prompts import REFUSAL_FULL, SYSTEM, _context, qa_user
 from data.teacher import finish, load_teacher
 
 CHUNKS_FILE = Path(__file__).parent / "out" / "chunks.jsonl"
@@ -166,36 +167,74 @@ def step_answers(teacher) -> None:
         print(f"    A: {ex['messages'][2]['content'][:500]}")
 
 
-def step_unanswerable(_teacher=None) -> None:
-    """Task 1.11: held-out questions + top-4 chunks from OTHER articles (hard negatives) → fixed refusal."""
+N_UNANSWERABLE = 150
+N_NEGATIVE_CANDIDATES = 600  # many get rejected by the judge: Kol Zchut articles overlap a lot
+
+JUDGE_PROMPT = """קטעי מידע:
+{context}
+
+שאלה: {question}
+
+האם אפשר לענות על השאלה, אפילו חלקית, רק לפי קטעי המידע? ענה במילה אחת: כן או לא."""
+
+
+def step_negatives(_teacher=None) -> None:
+    """Task 1.11a: candidate questions + top-4 chunks from OTHER articles (hard negatives)."""
     import numpy as np
     from sentence_transformers import SentenceTransformer
 
     chunks = read_jsonl(CHUNKS_FILE)
     vectors = np.load(EMBEDDINGS_FILE)
-    held_out = read_jsonl(GEN_DIR / "heldout_questions.jsonl")
+
+    # The 150 held-out questions first, then questions never sampled in 1.9 (no overlap with the QA set).
+    used = {q["question"] for q in read_jsonl(GEN_DIR / "questions.jsonl")}
+    unused = [q for q in read_jsonl(GEN_DIR / "questions_all.jsonl") if q["question"] not in used]
+    random.Random(SEED).shuffle(unused)
+    candidates = read_jsonl(GEN_DIR / "heldout_questions.jsonl")
+    candidates += unused[:N_NEGATIVE_CANDIDATES - len(candidates)]
 
     embedder = SentenceTransformer(EMBED_MODEL, device="cuda")
-    q_vectors = embedder.encode([f"query: {q['question']}" for q in held_out], normalize_embeddings=True, batch_size=64)
+    q_vectors = embedder.encode([f"query: {q['question']}" for q in candidates], normalize_embeddings=True,
+                                batch_size=64)
     ranked = np.argsort(-(q_vectors @ vectors.T), axis=1)
+    for q, order in zip(candidates, ranked):
+        q["context_ids"] = [chunks[i]["id"] for i in order if chunks[i]["title"] != q["article"]][:TOP_K]
+    write_jsonl(GEN_DIR / "negative_candidates.jsonl", candidates)
+    print(f"negative candidates: {len(candidates)} → {GEN_DIR / 'negative_candidates.jsonl'}")
 
+
+def step_unanswerable(teacher) -> None:
+    """Task 1.11b: keep candidates the teacher judges unanswerable from their context → fixed refusal."""
+    chunk_by_id = {c["id"]: c for c in read_jsonl(CHUNKS_FILE)}
+    candidates = read_jsonl(GEN_DIR / "negative_candidates.jsonl")
+    judge = [[{"role": "user", "content": JUDGE_PROMPT.format(
+                  context=_context([chunk_by_id[i] for i in q["context_ids"]]),
+                  question=q["question"])}]
+             for q in candidates]
+    outputs = teacher.chat(judge, SamplingParams(temperature=0, max_tokens=5))
+    verdicts = [re.sub(r"<think>.*?</think>", "", o.outputs[0].text, flags=re.S).strip() for o in outputs]
+    kept = [q for q, v in zip(candidates, verdicts) if v.startswith("לא")]
+    print(f"judge: {len(kept)} of {len(candidates)} unanswerable "
+          f"(yes: {sum(v.startswith('כן') for v in verdicts)}, other: {sum(not v.startswith(('כן', 'לא')) for v in verdicts)})")
+
+    rng = random.Random(SEED)
+    kept = rng.sample(kept, min(N_UNANSWERABLE, len(kept)))
     examples = []
-    for q, order in zip(held_out, ranked):
-        ctx = [chunks[i] for i in order if chunks[i]["title"] != q["article"]][:TOP_K]
+    for q in kept:
         messages = [{"role": "system", "content": SYSTEM},
-                    {"role": "user", "content": qa_user(q["question"], ctx)},
+                    {"role": "user", "content": qa_user(q["question"], [chunk_by_id[i] for i in q["context_ids"]])},
                     {"role": "assistant", "content": REFUSAL_FULL}]
         examples.append({"type": "unanswerable", "article": q["article"], "source_chunk_id": q["source_chunk_id"],
-                         "context_ids": [c["id"] for c in ctx], "messages": messages})
+                         "context_ids": q["context_ids"], "messages": messages})
     write_jsonl(GEN_DIR / "unanswerable.jsonl", examples)
     print(f"unanswerable examples: {len(examples)} → {GEN_DIR / 'unanswerable.jsonl'}")
-    for ex in random.Random(SEED).sample(examples, 3):
+    for ex in rng.sample(examples, 3):
         print(f"\n--- Q ({ex['article']}): {ex['messages'][1]['content'].split('שאלה: ')[1].split(chr(10))[0]}")
         print(f"    context: {[i.split('#')[0][:40] for i in ex['context_ids']]}")
 
 
 STEPS = {"questions": (step_questions, True), "retrieve": (step_retrieve, False), "answers": (step_answers, True),
-         "unanswerable": (step_unanswerable, False)}
+         "negatives": (step_negatives, False), "unanswerable": (step_unanswerable, True)}
 
 if __name__ == "__main__":
     step, needs_teacher = STEPS[sys.argv[1]]
