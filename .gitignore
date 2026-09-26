@@ -20,3 +20,7 @@ data/raw/
 
 # Embeddings (made on Colab, kept on Drive)
 *.npy
+
+# Generated data: raw teacher output lives on Drive; only the final splits are committed
+data/out/gen/
+data/out/filtered.jsonl
