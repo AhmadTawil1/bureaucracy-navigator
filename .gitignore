@@ -17,3 +17,6 @@ docs/
 qdrant_data/
 data/raw/
 *.gguf
+
+# Embeddings (made on Colab, kept on Drive)
+*.npy
