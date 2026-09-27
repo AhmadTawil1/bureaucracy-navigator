@@ -56,10 +56,15 @@ def refusal(question: str) -> str:
 
 
 def with_sources(answer: str, chunks: list[dict]) -> str:
-    """Append one line per cited chunk: [n] title — url (the user's letter has no url)."""
+    """Append the sources: one line per cited chunk ([n] title — url). If the model cited nothing
+    (it sometimes copies the context instead), list the articles it was given, so there are always links."""
     cited = sorted({int(n) for n in re.findall(r"\[(\d+)\]", answer) if 1 <= int(n) <= len(chunks)})
-    lines = [f"[{n}] {chunks[n - 1]['title']}" + (f" — {chunks[n - 1]['url']}" if chunks[n - 1].get("url") else "")
-             for n in cited]
+    if cited:
+        lines = [f"[{n}] {chunks[n - 1]['title']}" + (f" — {chunks[n - 1]['url']}" if chunks[n - 1].get("url") else "")
+                 for n in cited]
+    else:
+        urls = dict.fromkeys((c["title"], c["url"]) for c in chunks if c.get("url"))  # unique, in order
+        lines = [f"{title} — {url}" for title, url in urls]
     sources = "\n\nמקורות:\n" + "\n".join(lines) if lines else ""
     return f"{answer}{sources}\n\n{DISCLAIMER}"
 
