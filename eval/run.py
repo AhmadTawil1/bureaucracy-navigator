@@ -94,6 +94,11 @@ def deadline_match(rows: list[dict], tests: list[dict]) -> float:
     return ratio(sum(any(v in r["output"] for v in date_variants(tests[r["id"]]["deadline"])) for r in letters), len(letters))
 
 
+def plain_text(rows: list[dict]) -> float:
+    """Answers without markdown (**bold**, # headings): the bot sends plain text to Telegram."""
+    return ratio(sum("**" not in r["output"] and not re.search(r"^#+ ", r["output"], re.M) for r in rows), len(rows))
+
+
 def words_per_sentence(rows: list[dict]) -> float:
     sentences = [s for r in rows for s in re.split(r"[.?!\n]+", r["output"]) if s.split()]
     return sum(len(s.split()) for s in sentences) / len(sentences)
@@ -109,6 +114,7 @@ def pct(value: float | None) -> str:
 
 def report(labels: list[str]) -> None:
     tests = read_jsonl(TEST_FILE)
+    n_deadlines = sum(1 for t in tests if t["type"] == "letter" and t["deadline"])
     table = {}
     for label in labels:
         rows = read_jsonl(RESULTS_DIR / f"{label}.jsonl")
@@ -118,7 +124,8 @@ def report(labels: list[str]) -> None:
             "Correct refusals (unanswerable)": pct(correct_refusals(rows)),
             "Wrong refusals (QA)": pct(wrong_refusals(rows)),
             "Letter: all 4 headings": pct(letter_headings(rows)),
-            "Letter: deadline match": pct(deadline_match(rows, tests)),
+            f"Letter: deadline match (n={n_deadlines})": pct(deadline_match(rows, tests)),
+            "Plain text (no markdown)": pct(plain_text(rows)),
             "Words per sentence": f"{words_per_sentence(rows):.1f}",
             "Seconds per answer (CPU)": f"{seconds_per_answer(read_jsonl(speed_file)):.1f}" if speed_file.exists() else "—",
         }
