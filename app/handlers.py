@@ -55,6 +55,11 @@ def refusal(question: str) -> str:
     return f"{REFUSAL_FULL}\n{SEARCH_URL}{quote(question)}"
 
 
+def is_refusal(answer: str) -> bool:
+    """The model sometimes rewords the refusal ("לא מצאתי מידע אמין על מזג האוויר במקורות שלי")."""
+    return REFUSAL in answer or answer.lstrip().startswith("לא מצאתי מידע")
+
+
 def with_sources(answer: str, chunks: list[dict]) -> str:
     """Append the sources: one line per cited chunk ([n] title — url). If the model cited nothing
     (it sometimes copies the context instead), list the articles it was given, so there are always links."""
@@ -87,7 +92,7 @@ async def answer_question(chat_id: int, question: str) -> None:
     if letter:  # follow-up about the stored letter: the letter itself is context [1]
         chunks = [{"title": LETTER_TITLE, "section": "", "text": letter}] + chunks
     answer = await ask_model(chat_id, qa_user(question, chunks))
-    if REFUSAL in answer:
+    if is_refusal(answer):
         await telegram.send_text(chat_id, refusal(question))
     else:
         await telegram.send_text(chat_id, with_sources(answer, chunks))
